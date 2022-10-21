@@ -12,8 +12,6 @@ $ pip install okolab
 
 ## Usage
 
-To create an Okolab
-
 ```py
 from okolab import OkolabDevice
 
@@ -40,7 +38,7 @@ task = device.reconnect(interval=1)
 # Wait for reconnect (or cancellation)
 await task
 
-# Stop try to reconnect
+# Stop trying to reconnect
 task.cancel()
 ```
 

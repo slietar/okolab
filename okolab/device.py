@@ -12,6 +12,7 @@ from serial.serialutil import SerialException
 
 
 class OkolabDeviceStatus(IntEnum):
+  Ok = 0
   Transient = 1
   Alarm = 2
   Error = 3
@@ -56,7 +57,7 @@ class OkolabDevice:
       infos = serial.tools.list_ports.comports()
 
       for info in infos:
-        if (info.vid, info.pid) == (0x03eb, 0x2404) or 1:
+        if (info.vid, info.pid) == (0x03eb, 0x2404):
           await self._connect_address(info.device)
 
           if self.connected:
@@ -70,11 +71,11 @@ class OkolabDevice:
         baudrate=115200,
         port=address
       )
-    except SerialException:
+
+      serial_number = await asyncio.wait_for(self.get_serial_number(), timeout=1)
+    except (asyncio.TimeoutError, SerialException):
       self._serial = None
     else:
-      serial_number = await self.get_serial_number()
-
       if (self._serial_number is None) or (serial_number == self._serial_number):
         self.connected = True
 
@@ -178,6 +179,12 @@ class OkolabDevice:
     finally:
       self._lock.release()
 
+  async def get_board_temperature(self):
+    return float(await self._request("026"))
+
+  async def get_product_name(self):
+    return await self._request("017")
+
   async def get_serial_number(self):
     return await self._request("018")
 
@@ -201,7 +208,7 @@ class OkolabDevice:
 
   async def get_temperature1(self):
     value = await self._request("001")
-    return float(value) if value != "OFF" else None
+    return float(value) if (value != "OFF") and (value != "OPEN") else None
 
   async def get_temperature_setpoint1(self):
     return float(await self._request("002"))
@@ -210,8 +217,17 @@ class OkolabDevice:
     assert 25.0 <= value <= 60.0
     await self._request("008" + str(value))
 
+  async def get_temperature_setpoint_range1(self):
+    return (
+      float(await self._request("005")),
+      float(await self._request("006"))
+    )
+
   async def get_status(self):
     return OkolabDeviceStatus(int(await self._request("110")))
+
+  async def get_status1(self):
+    return OkolabDeviceStatus(int(await self._request("004")))
 
   async def get_uptime(self):
     match = re.match(r"(\d+) d, (\d\d):(\d\d):(\d\d)", await self._request("025"))
@@ -226,6 +242,7 @@ class OkolabDevice:
 __all__ = [
   "OkolabDevice",
   "OkolabDeviceDisconnectedError",
+  "OkolabDeviceStatus",
   "OkolabDeviceSystemError"
 ]
 
@@ -251,10 +268,13 @@ if __name__ == "__main__":
 
     await device.set_time(await device.get_time() + timedelta(hours=1))
 
+    print(await device.get_board_temperature())
+    print(await device.get_product_name())
     print(await device.get_uptime())
     print(await asyncio.gather(
       device.get_temperature1(),
       device.get_temperature_setpoint1()
     ))
+    print(await device.get_temperature_setpoint_range1())
 
   asyncio.run(main())
