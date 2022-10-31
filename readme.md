@@ -15,47 +15,17 @@ $ pip install okolab
 ```py
 from okolab import OkolabDevice
 
-# If you know the device's address
 device = OkolabDevice(address="COM3")
 device = OkolabDevice(address="/dev/tty.usbmodem1101")
-
-# If you know the device's serial number
-device = OkolabDevice(serial_number="2133")
-```
-
-```py
-# Try connecting
-await device.connect()
-
-if device.connected:
-  # Do something
-```
-
-```py
-# Reconnect every few seconds
-task = device.reconnect(interval=1)
-
-# Wait for reconnect (or cancellation)
-await task
-
-# Stop trying to reconnect
-task.cancel()
 ```
 
 ```py
 # Using callbacks
 
-class Device(OkolabDevice):
-  async def _on_connection(self, *, reconnection: bool):
-    print("Connected")
+def on_close(*, lost):
+  print(f"Connection closed, lost={lost}")
 
-  async def _on_connection_fail(self, reconnection: bool):
-    print("Connection failed")
-
-  async def _on_disconnection(self, *, lost: bool):
-    print("Disconnected")
-
-device = Device(...)
+device = Device(address="COM3", on_close=on_close)
 ```
 
 ```py
@@ -86,4 +56,14 @@ except OkolabDeviceDisconnectedError:
   # The device has been disconnected
 except OkolabDeviceSystemError:
   # The device has reported an error
+```
+
+```py
+from okolab import OkolabDevice
+
+infos = OkolabDevice.list()
+
+for info in infos:
+  device = info.create()
+  print(device.get_serial_number())
 ```
