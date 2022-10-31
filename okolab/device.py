@@ -3,7 +3,7 @@ import re
 import traceback
 from datetime import datetime, timedelta
 from enum import IntEnum
-from typing import Optional
+from typing import Awaitable, Callable, Coroutine, Generic, Optional, Protocol, Sequence, TypeVar, cast
 
 import serial
 import serial.tools.list_ports
@@ -24,114 +24,36 @@ class OkolabDeviceDisconnectedError(Exception):
 class OkolabDeviceSystemError(Exception):
   pass
 
+class OkolabDeviceInfo:
+  def __init__(self, *, address):
+    self.address = address
+
+  def create(self, **kwargs):
+    return OkolabDevice(self.address, **kwargs)
+
+
 class OkolabDevice:
-  def __init__(self, *, address: Optional[str] = None, serial_number: Optional[str] = None):
-    self._address = address
-    self._serial_number = serial_number
-
+  def __init__(self, address: str, *, on_close: Optional[Callable[..., Awaitable[None]]] = None):
     self._lock = asyncio.Lock()
+    self._on_close = on_close
+    self._serial: Optional[AioSerial] = AioSerial(
+      baudrate=115200,
+      port=address
+    )
+
+  async def close(self):
+    await self._lock.acquire()
+
+    if not self._serial:
+      raise OkolabDeviceDisconnectedError()
+
+    self._serial.close()
     self._serial = None
-    self._reconnect_task = None
 
-    self.connected = False
+    if self._on_close:
+      await self._on_close(lost=False)
 
-
-  # Callback methods to be implemented by subclasses
-
-  async def _on_connection(self, *, reconnection: bool):
-    pass
-
-  async def _on_connection_fail(self, reconnection: bool):
-    pass
-
-  async def _on_disconnection(self, *, lost: bool):
-    pass
-
-
-  # Connection methods
-
-  async def _connect(self):
-    if self._address is not None:
-      await self._connect_address(self._address)
-    else:
-      infos = serial.tools.list_ports.comports()
-
-      for info in infos:
-        if (info.vid, info.pid) == (0x03eb, 0x2404):
-          await self._connect_address(info.device)
-
-          if self.connected:
-            break
-
-    return self.connected
-
-  async def _connect_address(self, address: str):
-    try:
-      self._serial = AioSerial(
-        baudrate=115200,
-        port=address
-      )
-
-      serial_number = await asyncio.wait_for(self.get_serial_number(), timeout=1)
-    except (asyncio.TimeoutError, SerialException):
-      self._serial = None
-    else:
-      if (self._serial_number is None) or (serial_number == self._serial_number):
-        self.connected = True
-
-  async def connect(self):
-    connected = await self._connect()
-
-    if connected:
-      await self._on_connection(reconnection=False)
-    else:
-      await self._on_connection_fail(reconnection=False)
-
-    return connected
-
-  def reconnect(self, *, initial_wait = False, interval = 1):
-    async def reconnect_loop():
-      try:
-        if initial_wait:
-          await asyncio.sleep(interval)
-
-        while True:
-          if await self._connect():
-            await self._on_connection(reconnection=True)
-            return
-          else:
-            await self._on_connection_fail(reconnection=True)
-
-          await asyncio.sleep(interval)
-      except asyncio.CancelledError:
-        pass
-      except Exception:
-        traceback.print_exc()
-      finally:
-        self._reconnect_task = None
-
-    self._reconnect_task = asyncio.create_task(reconnect_loop())
-    return self._reconnect_task
-
-  async def start(self):
-    if not await self.connect():
-      self.reconnect(initial_wait=True)
-
-  async def stop(self):
-    if self._serial:
-      await self._lock.acquire()
-      self._lock.release()
-
-      self._serial.close()
-      self._serial = None
-
-    if self._reconnect_task:
-      self._reconnect_task.cancel()
-
-    await self._on_disconnection(lost=False)
-
-
-  # Request methods
+    self._lock.release()
 
   async def _request(self, command):
     await self._lock.acquire()
@@ -166,14 +88,10 @@ class OkolabDevice:
 
       return res[3:-1]
     except SerialException as e:
-      self.connected = False
       self._serial = None
 
-      # if self._check_task:
-      #   self._check_task.cancel()
-
-      await self._on_disconnection(lost=True)
-      self.reconnect()
+      if self._on_close:
+        await self._on_close(lost=True)
 
       raise OkolabDeviceDisconnectedError() from e
     finally:
@@ -238,6 +156,150 @@ class OkolabDevice:
     days, hours, minutes, seconds = match.groups()
     return timedelta(days=int(days), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
 
+  @classmethod
+  def list(cls, *, all = False):
+    infos = serial.tools.list_ports.comports()
+    return [OkolabDeviceInfo(address=info.device) for info in infos if all or (info.vid, info.pid) == (0x03eb, 0x2404)]
+
+
+class GeneralDevice(Protocol):
+  def __init__(self, address: str, *, on_close: Optional[Callable[..., Awaitable[None]]] = None):
+    pass
+
+  async def close(self):
+    raise NotImplementedError()
+
+  async def get_serial_number(self) -> Optional[str]:
+    raise NotImplementedError()
+
+  @classmethod
+  def list(cls) -> Sequence[OkolabDeviceInfo]:
+    raise NotImplementedError()
+
+
+T = TypeVar('T', bound=GeneralDevice)
+
+class GeneralDeviceAdapter(Generic[T]):
+  def __init__(self, Device: type[T], *, address: Optional[str] = None, reconnect_device: bool = True, serial_number: Optional[str] = None):
+    self._Device = Device
+
+    self._address = address
+    self._serial_number = serial_number
+
+    self._device: Optional[T] = None
+    self._reconnect_task = None
+
+    self.connected = False
+    self.reconnect_device = reconnect_device
+
+  @property
+  def device(self):
+    if not self.connected:
+      raise OkolabDeviceDisconnectedError()
+
+    return cast(T, self._device)
+
+
+  # Callback methods to be implemented by subclasses
+
+  async def _on_connection(self, *, reconnection: bool):
+    pass
+
+  async def _on_connection_fail(self, reconnection: bool):
+    pass
+
+  async def _on_disconnection(self, *, lost: bool):
+    pass
+
+
+  # Connection methods
+
+  async def _connect(self):
+    if self._address is not None:
+      await self._connect_address(self._address)
+    else:
+      for info in self._Device.list():
+        await self._connect_address(info.address)
+
+        if self.connected:
+          break
+
+    return self.connected
+
+  async def _connect_address(self, address: str):
+    async def on_close(*, lost: bool):
+      if lost:
+        self.connected = False
+        self._device = None
+
+        if self.reconnect_device:
+          self.reconnect()
+
+        await self._on_disconnection(lost=lost)
+
+    try:
+      self._device = self._Device(address, on_close=on_close)
+      serial_number = await asyncio.wait_for(self._device.get_serial_number(), timeout=1)
+    except (asyncio.TimeoutError, SerialException):
+      self._device = None
+    else:
+      if (self._serial_number is None) or (serial_number == self._serial_number):
+        self.connected = True
+      else:
+        self._device = None
+
+
+  async def connect(self):
+    connected = await self._connect()
+
+    if connected:
+      await self._on_connection(reconnection=False)
+    else:
+      await self._on_connection_fail(reconnection=False)
+
+    return connected
+
+  def reconnect(self, *, initial_wait = False, interval = 1):
+    async def reconnect_loop():
+      try:
+        if initial_wait:
+          await asyncio.sleep(interval)
+
+        while True:
+          if await self._connect():
+            await self._on_connection(reconnection=True)
+            return
+          else:
+            await self._on_connection_fail(reconnection=True)
+
+          await asyncio.sleep(interval)
+      except asyncio.CancelledError:
+        pass
+      except Exception:
+        traceback.print_exc()
+      finally:
+        self._reconnect_task = None
+
+    self._reconnect_task = asyncio.create_task(reconnect_loop())
+    return self._reconnect_task
+
+  async def start(self):
+    if not await self.connect():
+      self.reconnect(initial_wait=True)
+
+  async def stop(self):
+    if self._device:
+      await self._device.close()
+
+      self.connected = False
+      self._device = None
+
+      await self._on_disconnection(lost=False)
+
+    if self._reconnect_task:
+      self._reconnect_task.cancel()
+
+
 
 __all__ = [
   "OkolabDevice",
@@ -249,32 +311,48 @@ __all__ = [
 
 if __name__ == "__main__":
   async def main():
-    class Device(OkolabDevice):
+    class Adapter(GeneralDeviceAdapter[OkolabDevice]):
+      def __init__(self, serial_number):
+        super().__init__(OkolabDevice, serial_number=serial_number)
+
       async def _on_connection(self, *, reconnection: bool):
-        print("Connected")
+        print("Connected, reconnection=", reconnection)
 
       async def _on_connection_fail(self, reconnection: bool):
-        print("Connection failed")
+        print("Connection failed, reconnection=", reconnection)
 
       async def _on_disconnection(self, *, lost: bool):
-        print("Disconnected")
+        print("Disconnected, lost=", lost)
 
-    device = Device(serial_number="2133")
+    adapter = Adapter(serial_number="2133")
 
-    await device.connect()
+    await adapter.connect()
 
-    if not device.connected:
-      await device.reconnect(initial_wait=True)
+    # if not adapter.connected:
+    #   await adapter.reconnect(initial_wait=True)
 
-    await device.set_time(await device.get_time() + timedelta(hours=1))
+    adapter.reconnect(initial_wait=True)
 
-    print(await device.get_board_temperature())
-    print(await device.get_product_name())
-    print(await device.get_uptime())
-    print(await asyncio.gather(
-      device.get_temperature1(),
-      device.get_temperature_setpoint1()
-    ))
-    print(await device.get_temperature_setpoint_range1())
+    # await adapter.device.set_time(await adapter.device.get_time() + timedelta(hours=1))
+
+    # print(await adapter.device.get_board_temperature())
+    # print(await adapter.device.get_product_name())
+    # print(await adapter.device.get_uptime())
+    # print(await asyncio.gather(
+    #   adapter.device.get_temperature1(),
+    #   adapter.device.get_temperature_setpoint1()
+    # ))
+    # print(await adapter.device.get_temperature_setpoint_range1())
+
+    while True:
+      await asyncio.sleep(1)
+
+      if adapter.connected:
+        try:
+          print(await adapter.device.get_uptime())
+        except Exception as e:
+          print(e)
+
+    # await adapter.stop()
 
   asyncio.run(main())
