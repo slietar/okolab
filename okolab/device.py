@@ -132,7 +132,7 @@ class OkolabDevice:
 
   async def set_temperature_setpoint1(self, /, value: float):
     assert 25.0 <= value <= 60.0
-    await self._request("008" + str(value))
+    await self._request(f"008{value:.01f}")
 
   async def get_temperature_setpoint_range1(self):
     return (
