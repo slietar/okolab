@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
   name="okolab",
-  version="0.0.0",
+  version="0.1.0",
 
   description="Control of the H401-T-CONTROLLER temperature controller from Okolab",
   url="https://github.com/slietar/okolab",
