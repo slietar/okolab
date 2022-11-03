@@ -35,10 +35,14 @@ class OkolabDevice:
   def __init__(self, address: str, *, on_close: Optional[Callable[..., Awaitable[None]]] = None):
     self._lock = asyncio.Lock()
     self._on_close = on_close
-    self._serial: Optional[AioSerial] = AioSerial(
-      baudrate=115200,
-      port=address
-    )
+
+    try:
+      self._serial: Optional[AioSerial] = AioSerial(
+        baudrate=115200,
+        port=address
+      )
+    except SerialException as e:
+      raise OkolabDeviceDisconnectedError() from e
 
   async def close(self):
     await self._lock.acquire()
