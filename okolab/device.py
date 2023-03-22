@@ -1,13 +1,13 @@
 import asyncio
 import re
+from asyncio import Lock
 from datetime import datetime, timedelta
 from enum import IntEnum
-from typing import Awaitable, Callable, Optional, Sequence
+from typing import Optional, Protocol
 
 import serial
 import serial.tools.list_ports
-from aioserial import AioSerial
-from serial.serialutil import SerialException
+from serial import Serial, SerialException
 
 
 class OkolabDeviceStatus(IntEnum):
@@ -31,42 +31,56 @@ class OkolabDeviceInfo:
     return OkolabDevice(self.address, **kwargs)
 
 
+class OkolabDeviceLostCallback(Protocol):
+  async def __call__(self, *, lost: bool):
+    ...
+
+
 class OkolabDevice:
-  def __init__(self, address: str, *, on_close: Optional[Callable[..., Awaitable[None]]] = None):
-    self._lock = asyncio.Lock()
+  def __init__(self, address: str, *, on_close: Optional[OkolabDeviceLostCallback] = None):
+    self._lock = Lock()
     self._on_close = on_close
 
     try:
-      self._serial: Optional[AioSerial] = AioSerial(
+      self._serial: Optional[Serial] = Serial(
         baudrate=115200,
         port=address
       )
     except SerialException as e:
-      raise OkolabDeviceDisconnectedError() from e
+      raise OkolabDeviceDisconnectedError from e
 
   async def close(self):
-    await self._lock.acquire()
-
     if not self._serial:
-      raise OkolabDeviceDisconnectedError()
+      raise OkolabDeviceDisconnectedError
 
-    self._serial.close()
-    self._serial = None
+    async with self._lock:
+      self._serial.close()
+      self._serial = None
 
-    if self._on_close:
-      await self._on_close(lost=False)
-
-    self._lock.release()
+      if self._on_close:
+        await self._on_close(lost=False)
 
   async def _request(self, command):
-    await self._lock.acquire()
-
     if not self._serial:
-      raise OkolabDeviceDisconnectedError()
+      raise OkolabDeviceDisconnectedError
 
-    try:
-      await self._serial.write_async(f"{command}\r".encode("ascii"))
-      res = (await self._serial.read_until_async(b"\r")).decode("ascii")
+    def request():
+      assert self._serial
+      self._serial.write(f"{command}\r".encode("ascii"))
+      return self._serial.read_until(b"\r").decode("ascii")
+
+    async with self._lock:
+      loop = asyncio.get_event_loop()
+
+      try:
+        res = await loop.run_in_executor(None, request)
+      except SerialException as e:
+        self._serial = None
+
+        if self._on_close:
+          await self._on_close(lost=True)
+
+        raise OkolabDeviceDisconnectedError from e
 
       if res[0] == "E":
         match int(res[1:]):
@@ -87,18 +101,9 @@ class OkolabDevice:
           case 15:
             raise OkolabDeviceSystemError("Request not properly formatted")
           case _:
-            raise OkolabDeviceSystemError()
+            raise OkolabDeviceSystemError
 
       return res[3:-1]
-    except SerialException as e:
-      self._serial = None
-
-      if self._on_close:
-        await self._on_close(lost=True)
-
-      raise OkolabDeviceDisconnectedError() from e
-    finally:
-      self._lock.release()
 
   async def get_board_temperature(self):
     return float(await self._request("026"))
@@ -154,15 +159,18 @@ class OkolabDevice:
     match = re.match(r"(\d+) d, (\d\d):(\d\d):(\d\d)", await self._request("025"))
 
     if not match:
-      raise ValueError()
+      raise ValueError("Malformed response")
 
     days, hours, minutes, seconds = match.groups()
     return timedelta(days=int(days), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
 
   @staticmethod
-  def list(*, all = False) -> Sequence[OkolabDeviceInfo]:
+  def list(*, all: bool = False):
     infos = serial.tools.list_ports.comports()
-    return [OkolabDeviceInfo(address=info.device) for info in infos if all or (info.vid, info.pid) == (0x03eb, 0x2404)]
+
+    for info in infos:
+      if all or (info.vid, info.pid) == (0x03eb, 0x2404):
+        yield OkolabDeviceInfo(address=info.device)
 
 
 __all__ = [

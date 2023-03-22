@@ -9,7 +9,6 @@ setup(
 
   python_requires=">=3.10",
   install_requires=[
-    "aioserial==1.3.1",
-    "pyserial==3.5"
+    "pyserial>=3.5,<4"
   ]
 )
