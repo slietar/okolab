@@ -7,6 +7,9 @@ This Python package provides control of the [H401-T-CONTROLLER](https://www.oko-
 
 ```sh
 $ pip install okolab
+
+# List available devices
+$ python -m okolab
 ```
 
 
@@ -20,8 +23,6 @@ device = OkolabDevice(address="/dev/tty.usbmodem1101")
 ```
 
 ```py
-# Using callbacks
-
 def on_close(*, lost):
   print(f"Connection closed, lost={lost}")
 
