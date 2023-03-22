@@ -1,3 +1,22 @@
 [build-system]
-requires = ["setuptools>=42"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "okolab"
+version = "0.1.0"
+
+description = "A Python package that provides control of the H401-T-CONTROLLER temperature controller from Okolab"
+readme = "readme.md"
+license = { text = "EUPL-1.2" }
+requires-python = ">=3.11"
+
+dependencies = [
+  "pyserial>=3.5,<4"
+]
+
+[project.urls]
+repository = "https://github.com/slietar/okolab"
+
+[tool.setuptools.packages.find]
+include = ["okolab"]
