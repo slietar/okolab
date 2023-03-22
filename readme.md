@@ -65,5 +65,5 @@ infos = OkolabDevice.list()
 
 for info in infos:
   device = info.create()
-  print(device.get_serial_number())
+  print(await device.get_serial_number())
 ```
