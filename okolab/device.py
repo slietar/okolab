@@ -1,10 +1,10 @@
 import asyncio
-from dataclasses import dataclass
 import re
 from asyncio import Future, Lock
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import IntEnum
-from typing import Optional, Protocol
+from typing import Optional
 
 import serial
 import serial.tools.list_ports
@@ -23,12 +23,12 @@ class OkolabDeviceConnectionLostError(Exception):
   An error raised by `OkolabDevice.closed()` when the connection to the controller is lost.
   """
 
-class OkolabDeviceDisconnectedError(Exception):
+class OkolabDeviceConnectionError(Exception):
   """
-  An error raised when the controller is disconnected.
+  An error raised when the connection to the controller fails or is corrupted.
   """
 
-class OkolabDeviceProtocolError(Exception):
+class OkolabDeviceProtocolError(OkolabDeviceConnectionError):
   """
   An error raised when the controller returns malformed data.
   """
@@ -51,7 +51,7 @@ class OkolabDevice:
   """
   An object represting a connection to an H401-T-CONTROLLER from Okolab.
 
-  Only one request to the controller is permitted at a time. Concurrent requests will be queued. Every method may raise an `OkolabDeviceDisconnectedError` if the controller is or becomes disconnected, and an `OkolabDeviceSystemError` if the controller reports an error.
+  Only one request to the controller is permitted at a time; concurrent requests will be queued. Every method may raise an `OkolabDeviceDisconnectedError` if the controller is or becomes disconnected, and an `OkolabDeviceSystemError` if the controller reports an error.
 
   Attributes
     address: The address of the device.
@@ -70,7 +70,7 @@ class OkolabDevice:
 
     self.address = address
 
-    self._closed = Future[None]()
+    self._closed = Future[bool]() # true = lost
     self._lock = Lock()
 
     try:
@@ -78,8 +78,8 @@ class OkolabDevice:
         baudrate=115200,
         port=address
       )
-    except (FileNotFoundError, SerialException) as e:
-      raise OkolabDeviceDisconnectedError from e
+    except (OSError, SerialException) as e:
+      raise OkolabDeviceConnectionError from e
 
   async def close(self):
     """
@@ -91,7 +91,7 @@ class OkolabDevice:
         self._serial.close()
         self._serial = None
 
-        self._closed.set_result(None)
+        self._closed.set_result(False)
 
   async def closed(self):
     """
@@ -105,12 +105,13 @@ class OkolabDevice:
     """
 
     try:
-      await asyncio.shield(self._closed)
+      if await asyncio.shield(self._closed):
+        raise OkolabDeviceConnectionLostError
     except asyncio.CancelledError:
       await self.close()
       raise
 
-  async def _request(self, command):
+  async def _request(self, command: str):
     def request():
       assert self._serial
       self._serial.write(f"{command}\r".encode("ascii"))
@@ -118,17 +119,19 @@ class OkolabDevice:
 
     async with self._lock:
       if not self._serial:
-        raise OkolabDeviceDisconnectedError
+        raise OkolabDeviceConnectionError
 
       loop = asyncio.get_event_loop()
 
       try:
-        res = await loop.run_in_executor(None, request)
-      except SerialException as e:
-        self._closed.set_exception(OkolabDeviceConnectionLostError())
+        res = await asyncio.wait_for(loop.run_in_executor(None, request), timeout=2.0)
+      except (SerialException, asyncio.TimeoutError) as e:
+        self._serial.close()
         self._serial = None
 
-        raise OkolabDeviceDisconnectedError from e
+        self._closed.set_result(True)
+
+        raise OkolabDeviceConnectionError from e
 
       if res[0] == "E":
         match int(res[1:]):
@@ -195,7 +198,7 @@ class OkolabDevice:
     except ValueError as e:
       raise OkolabDeviceProtocolError from e
 
-  async def set_time(self, date: datetime):
+  async def set_time(self, date: datetime, /):
     """
     Sets the time on the controller's clock.
     """
@@ -210,10 +213,12 @@ class OkolabDevice:
       The type id number, or `None` if the device is disabled.
     """
 
-    return type if (type := int(await self._request("111"))) >= 0 else None
+    res = await self._request("111")
+    return type if (res != "Disabled") and ((type := int(res)) >= 0) else None
 
   async def get_device2(self):
-    return type if (type := int(await self._request("113"))) >= 0 else None
+    res = await self._request("113")
+    return type if (res != "Disabled") and ((type := int(res)) >= 0) else None
 
   async def set_device1(self, type: Optional[int], *, side: Optional[int] = None):
     """
@@ -240,7 +245,7 @@ class OkolabDevice:
     Returns the observed temperature of device 1.
 
     Returns
-      The observed temperature, in Celsius degrees, or `None` if the device is disabled.
+      The observed temperature, in Celsius degrees, or `None` if the device is disabled or disconnected.
     """
 
     value = await self._request("001")
@@ -263,7 +268,7 @@ class OkolabDevice:
   async def get_temperature_setpoint2(self):
     return float(await self._request("067"))
 
-  async def set_temperature_setpoint1(self, /, value: float):
+  async def set_temperature_setpoint1(self, value: float, /):
     """
     Sets the temperature setpoint of device 1.
 
@@ -274,7 +279,7 @@ class OkolabDevice:
     assert 25.0 <= value <= 60.0
     await self._request(f"008{value:.01f}")
 
-  async def set_temperature_setpoint2(self, /, value: float):
+  async def set_temperature_setpoint2(self, value: float, /):
     assert 25.0 <= value <= 60.0
     await self._request(f"063{value:.01f}")
 
@@ -353,8 +358,8 @@ class OkolabDevice:
 
 __all__ = [
   "OkolabDevice",
+  "OkolabDeviceConnectionError",
   "OkolabDeviceConnectionLostError",
-  "OkolabDeviceDisconnectedError",
   "OkolabDeviceProtocolError",
   "OkolabDeviceStatus",
   "OkolabDeviceSystemError"
