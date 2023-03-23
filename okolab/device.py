@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 import re
-from asyncio import Lock
+from asyncio import Future, Lock
 from datetime import datetime, timedelta
 from enum import IntEnum
 from typing import Optional, Protocol
@@ -18,9 +18,19 @@ class OkolabDeviceStatus(IntEnum):
   Error = 3
   Disabled = 4
 
+class OkolabDeviceConnectionLostError(Exception):
+  """
+  An error raised by `OkolabDevice.closed()` when the connection to the controller is lost.
+  """
+
 class OkolabDeviceDisconnectedError(Exception):
   """
   An error raised when the controller is disconnected.
+  """
+
+class OkolabDeviceProtocolError(Exception):
+  """
+  An error raised when the controller returns malformed data.
   """
 
 class OkolabDeviceSystemError(Exception):
@@ -28,22 +38,13 @@ class OkolabDeviceSystemError(Exception):
   An error raised when the controller reports an error.
   """
 
+
 @dataclass(frozen=True, kw_only=True)
 class OkolabDeviceInfo:
   address: str
 
-  def create(self, **kwargs):
-    return OkolabDevice(self.address, **kwargs)
-
-
-class OkolabDeviceLostCallback(Protocol):
-  async def __call__(self, *, lost: bool):
-    """
-    Parameters
-      lost: A boolean which indicates whether the connection to the controller was lost, as opposed to closed using `OkolabDevice.close()`.
-    """
-
-    ...
+  def create(self):
+    return OkolabDevice(self.address)
 
 
 class OkolabDevice:
@@ -56,13 +57,12 @@ class OkolabDevice:
     address: The address of the device.
   """
 
-  def __init__(self, address: str, *, on_close: Optional[OkolabDeviceLostCallback] = None):
+  def __init__(self, address: str):
     """
     Constructs an `OkolabDevice` instance and opens the connection to the controller.
 
     Parameters
       address: The address of the device, such as `COM3` or `/dev/tty.usbmodem1101`.
-      on_close: A callback called once the device is disconnected.
 
     Raises
       OkolabDeviceDisconnectedError: If the controller is unreachable.
@@ -70,15 +70,15 @@ class OkolabDevice:
 
     self.address = address
 
+    self._closed = Future[None]()
     self._lock = Lock()
-    self._on_close = on_close
 
     try:
       self._serial: Optional[Serial] = Serial(
         baudrate=115200,
         port=address
       )
-    except SerialException as e:
+    except (FileNotFoundError, SerialException) as e:
       raise OkolabDeviceDisconnectedError from e
 
   async def close(self):
@@ -86,35 +86,47 @@ class OkolabDevice:
     Closes the connection to the controller.
     """
 
-    if not self._serial:
-      raise OkolabDeviceDisconnectedError
-
     async with self._lock:
-      self._serial.close()
-      self._serial = None
+      if self._serial:
+        self._serial.close()
+        self._serial = None
 
-      if self._on_close:
-        await self._on_close(lost=False)
+        self._closed.set_result(None)
+
+  async def closed(self):
+    """
+    Returns once the connection to the controller is closed.
+
+    Closes the connection when cancelled.
+
+    Raises
+      OkolabDeviceConnectionLostError: If the connection was lost, as opposed to closed using `close()`.
+      asyncio.CancelledError
+    """
+
+    try:
+      await asyncio.shield(self._closed)
+    except asyncio.CancelledError:
+      await self.close()
+      raise
 
   async def _request(self, command):
-    if not self._serial:
-      raise OkolabDeviceDisconnectedError
-
     def request():
       assert self._serial
       self._serial.write(f"{command}\r".encode("ascii"))
       return self._serial.read_until(b"\r").decode("ascii")
 
     async with self._lock:
+      if not self._serial:
+        raise OkolabDeviceDisconnectedError
+
       loop = asyncio.get_event_loop()
 
       try:
         res = await loop.run_in_executor(None, request)
       except SerialException as e:
+        self._closed.set_exception(OkolabDeviceConnectionLostError())
         self._serial = None
-
-        if self._on_close:
-          await self._on_close(lost=True)
 
         raise OkolabDeviceDisconnectedError from e
 
@@ -171,9 +183,17 @@ class OkolabDevice:
   async def get_time(self):
     """
     Returns the time on the controller's clock.
+
+    Raises
+      OkolabDeviceProtocolError
     """
 
-    return datetime.strptime(await self._request("070"), "%m/%d/%Y %H:%M:%S")
+    raw_value = await self._request("070")
+
+    try:
+      return datetime.strptime(raw_value, "%m/%d/%Y %H:%M:%S")
+    except ValueError as e:
+      raise OkolabDeviceProtocolError from e
 
   async def set_time(self, date: datetime):
     """
@@ -293,15 +313,24 @@ class OkolabDevice:
   async def get_uptime(self):
     """
     Returns the uptime of the controller.
+
+    Raises
+      OkolabDeviceProtocolError
     """
 
     match = re.match(r"(\d+) d, (\d\d):(\d\d):(\d\d)", await self._request("025"))
 
     if not match:
-      raise ValueError("Malformed response")
+      raise OkolabDeviceProtocolError
 
     days, hours, minutes, seconds = match.groups()
     return timedelta(days=int(days), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
+
+  async def __aenter__(self):
+    assert self._serial
+
+  async def __aexit__(self, exc_type, exc, tb):
+    await self.close()
 
   @staticmethod
   def list(*, all: bool = False):
@@ -324,7 +353,9 @@ class OkolabDevice:
 
 __all__ = [
   "OkolabDevice",
+  "OkolabDeviceConnectionLostError",
   "OkolabDeviceDisconnectedError",
+  "OkolabDeviceProtocolError",
   "OkolabDeviceStatus",
   "OkolabDeviceSystemError"
 ]

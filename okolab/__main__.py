@@ -38,7 +38,7 @@ async def main():
     if (id1 := await device.get_device1()) is not None:
       device_node.children.append(HierarchyNode([
         'Device 1',
-        f"Type id number: {id1}"
+        f"Status: {(await device.get_status1()).name}"
         f"Temperature: {(await device.get_temperature1()):.1f}°C",
         f"Setpoint: {(await device.get_temperature_setpoint1()):.1f}°C"
       ]))
@@ -48,7 +48,7 @@ async def main():
     if (id2 := await device.get_device2()) is not None:
       device_node.children.append(HierarchyNode([
         'Device 2',
-        f"Type id number: {id2}"
+        f"Status: {(await device.get_status2()).name}"
         f"Temperature: {(await device.get_temperature2()):.1f}°C",
         f"Setpoint: {(await device.get_temperature_setpoint2()):.1f}°C"
       ]))
