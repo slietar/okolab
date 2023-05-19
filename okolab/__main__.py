@@ -24,7 +24,7 @@ async def main():
 
   for device_info in OkolabDevice.list(all=True):
     try:
-      async with (device := device_info.create()):
+      async with device_info.create() as device:
         device_node = HierarchyNode([
           (await device.get_product_name()),
           f"Address: {device.address}",

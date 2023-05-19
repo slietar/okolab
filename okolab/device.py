@@ -10,6 +10,8 @@ import serial
 import serial.tools.list_ports
 from serial import Serial, SerialException
 
+from .util import aexit_handler
+
 
 class OkolabDeviceStatus(IntEnum):
   Ok = 0
@@ -81,36 +83,6 @@ class OkolabDevice:
     except (OSError, SerialException) as e:
       raise OkolabDeviceConnectionError from e
 
-  async def close(self):
-    """
-    Closes the connection to the controller.
-    """
-
-    async with self._lock:
-      if self._serial:
-        self._serial.close()
-        self._serial = None
-
-        self._closed.set_result(False)
-
-  async def closed(self):
-    """
-    Returns once the connection to the controller is closed.
-
-    Closes the connection when cancelled.
-
-    Raises
-      OkolabDeviceConnectionLostError: If the connection was lost, as opposed to closed using `close()`.
-      asyncio.CancelledError
-    """
-
-    try:
-      if await asyncio.shield(self._closed):
-        raise OkolabDeviceConnectionLostError
-    except asyncio.CancelledError:
-      await self.close()
-      raise
-
   async def _request(self, command: str):
     def request():
       assert self._serial
@@ -121,10 +93,8 @@ class OkolabDevice:
       if not self._serial:
         raise OkolabDeviceConnectionError
 
-      loop = asyncio.get_event_loop()
-
       try:
-        res = await asyncio.wait_for(loop.run_in_executor(None, request), timeout=2.0)
+        res = await asyncio.wait_for(asyncio.to_thread(request), timeout=2.0)
       except (SerialException, asyncio.TimeoutError) as e:
         self._serial.close()
         self._serial = None
@@ -331,10 +301,37 @@ class OkolabDevice:
     days, hours, minutes, seconds = match.groups()
     return timedelta(days=int(days), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
 
-  async def __aenter__(self):
-    assert self._serial
+  async def close(self):
+    """
+    Closes the connection to the controller.
+    """
 
-  async def __aexit__(self, exc_type, exc, tb):
+    async with self._lock:
+      if self._serial:
+        self._serial.close()
+        self._serial = None
+
+        self._closed.set_result(False)
+
+  async def closed(self):
+    """
+    Returns once the connection to the controller is closed.
+
+    Raises
+      OkolabDeviceConnectionLostError: If the connection was lost, as opposed to closed using `close()`.
+    """
+
+    return await asyncio.shield(self._closed)
+
+  async def open(self):
+    pass
+
+  async def __aenter__(self):
+    await self.open()
+    return self
+
+  @aexit_handler
+  async def __aexit__(self):
     await self.close()
 
   @staticmethod
@@ -349,18 +346,17 @@ class OkolabDevice:
       Instances of `OkolabDeviceInfo`.
     """
 
-    infos = serial.tools.list_ports.comports()
-
-    for info in infos:
-      if all or (info.vid, info.pid) == (0x03eb, 0x2404):
-        yield OkolabDeviceInfo(address=info.device)
+    for item in serial.tools.list_ports.comports():
+      if all or (item.vid, item.pid) == (0x03eb, 0x2404):
+        yield OkolabDeviceInfo(address=item.device)
 
 
 __all__ = [
-  "OkolabDevice",
-  "OkolabDeviceConnectionError",
-  "OkolabDeviceConnectionLostError",
-  "OkolabDeviceProtocolError",
-  "OkolabDeviceStatus",
-  "OkolabDeviceSystemError"
+  'OkolabDevice',
+  'OkolabDeviceConnectionError',
+  'OkolabDeviceConnectionLostError',
+  'OkolabDeviceInfo',
+  'OkolabDeviceProtocolError',
+  'OkolabDeviceStatus',
+  'OkolabDeviceSystemError'
 ]
