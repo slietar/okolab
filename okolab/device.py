@@ -20,11 +20,6 @@ class OkolabDeviceStatus(IntEnum):
   Error = 3
   Disabled = 4
 
-class OkolabDeviceConnectionLostError(Exception):
-  """
-  An error raised by `OkolabDevice.closed()` when the connection to the controller is lost.
-  """
-
 class OkolabDeviceConnectionError(Exception):
   """
   An error raised when the connection to the controller fails or is corrupted.
@@ -316,9 +311,6 @@ class OkolabDevice:
   async def closed(self):
     """
     Returns once the connection to the controller is closed.
-
-    Raises
-      OkolabDeviceConnectionLostError: If the connection was lost, as opposed to closed using `close()`.
     """
 
     return await asyncio.shield(self._closed)
@@ -354,7 +346,6 @@ class OkolabDevice:
 __all__ = [
   'OkolabDevice',
   'OkolabDeviceConnectionError',
-  'OkolabDeviceConnectionLostError',
   'OkolabDeviceInfo',
   'OkolabDeviceProtocolError',
   'OkolabDeviceStatus',
